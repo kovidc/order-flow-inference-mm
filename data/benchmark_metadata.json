@@ -1,0 +1,16 @@
+{
+  "market": {
+    "beta": 0.2,
+    "mu": 0.12,
+    "sigma": 0.35,
+    "pressure_stay": 0.94,
+    "horizon": 1000
+  },
+  "rolling_window": 10.0,
+  "rolling_intercept": 0.00465118617248311,
+  "rolling_slope": 0.12477827016735793,
+  "mean_brier_score": 0.2415596423733631,
+  "mean_log_loss": 0.6760987103086209,
+  "mean_map_accuracy": 0.5784333333333334,
+  "value_of_information_recovery": 0.36333240199129935
+}

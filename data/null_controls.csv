@@ -1,0 +1,3 @@
+experiment,value,mean_uplift,uplift_std,uplift_ci_low,uplift_ci_high,brier_score,log_loss,map_accuracy
+beta,0.0,0.0,0.0,0.0,0.0,0.25,0.6931471805599454,0.33603750000000004
+mu,0.0,0.0,0.0,0.0,0.0,0.2413089936115252,0.6755866298272065,0.5811875000000001
