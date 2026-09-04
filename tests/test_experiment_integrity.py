@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from order_flow_mm.policies import (
     FixedPolicy,
     InventoryPolicy,
     Quote,
+    RollingImbalancePolicy,
     fit_rolling_policy,
 )
 from order_flow_mm.simulator import MarketPath, generate_market_path
@@ -78,21 +80,111 @@ def test_bayesian_quotes_depend_on_beliefs_not_truth_signal_parameters() -> None
 
 
 def test_rolling_fit_cannot_depend_on_latent_regime_labels() -> None:
-    market = MarketParams(horizon=6)
-    common = {
-        "trade_signs": np.array([1, 1, -1, -1, 1, -1]),
-        "price_shocks": np.zeros(6),
-        "fill_uniforms": np.full(6, 0.5),
-        "prices": np.array([100.0, 100.2, 100.1, 99.9, 100.0, 100.3, 100.1]),
-        "seed": 5,
-    }
-    first = MarketPath(regimes=np.array([-1, -1, 0, 0, 1, 1]), **common)
-    second = MarketPath(regimes=np.array([1, 0, -1, 1, 0, -1]), **common)
-    first_fit = fit_rolling_policy([first], market, windows=(2,))
-    second_fit = fit_rolling_policy([second], market, windows=(2,))
-    assert (first_fit.window, first_fit.intercept, first_fit.slope) == pytest.approx(
-        (second_fit.window, second_fit.intercept, second_fit.slope)
+    market = MarketParams(horizon=150)
+    first = [generate_market_path(market, seed) for seed in range(4)]
+    second = [replace(path, regimes=-path.regimes) for path in first]
+    first_fit = fit_rolling_policy(first, market)
+    second_fit = fit_rolling_policy(second, market)
+    for name in (
+        "window", "intercept", "slope", "side_coefficient", "interaction_coefficient", "validation_mse"
+    ):
+        assert getattr(first_fit, name) == getattr(second_fit, name)
+
+
+def test_rolling_receives_only_prefix_and_ignores_current_and_future_signs() -> None:
+    market = MarketParams(horizon=30)
+    path = generate_market_path(market, seed=63)
+    time = 12
+    signs = path.trade_signs.copy()
+    signs[time:] *= -1
+    changed = replace(path, trade_signs=signs)
+    seen = []
+
+    class RecordingRolling(RollingImbalancePolicy):
+        def quote(self, inventory: int, trade_history: np.ndarray) -> Quote:
+            seen.append(trade_history.copy())
+            return super().quote(inventory, trade_history)
+
+    policy = RecordingRolling(market, 5, 0.01, 0.10, 0.03, 0.02)
+    first = run_backtest(policy, path, market)
+    for t, history in enumerate(seen):
+        np.testing.assert_array_equal(history, path.trade_signs[:t])
+    second = run_backtest(policy, changed, market)
+    np.testing.assert_array_equal(first.ask_distances[:time + 1], second.ask_distances[:time + 1])
+    np.testing.assert_array_equal(first.bid_distances[:time + 1], second.bid_distances[:time + 1])
+    np.testing.assert_array_equal(first.inventory[:time + 1], second.inventory[:time + 1])
+
+
+def test_rolling_window_validation_and_full_training_refit() -> None:
+    market = MarketParams(horizon=150)
+    paths = [generate_market_path(market, seed) for seed in range(8)]
+
+    def observations(subset: list[MarketPath], window: int) -> tuple[np.ndarray, np.ndarray]:
+        rows, targets = [], []
+        for path in subset:
+            for t in range(window, path.horizon):
+                x = np.mean(path.trade_signs[t - window:t])
+                y = path.trade_signs[t]
+                rows.append([1, x, y, x * y])
+                targets.append(path.prices[t + 1] - path.prices[t])
+        return np.array(rows), np.array(targets)
+
+    expected_mse = {}
+    for window in (5, 10, 20, 50, 100):
+        design, targets = observations(paths[:6], window)
+        coefficients = np.linalg.lstsq(design, targets, rcond=None)[0]
+        validation_design, validation_targets = observations(paths[6:], window)
+        expected_mse[window] = np.mean((validation_targets - validation_design @ coefficients)**2)
+    selected = min(expected_mse, key=lambda w: (expected_mse[w], w))
+    design, targets = observations(paths, selected)
+    expected_coefficients = np.linalg.lstsq(design, targets, rcond=None)[0]
+    policy = fit_rolling_policy(paths, market)
+    assert policy.window == selected
+    assert policy.validation_mse == pytest.approx(expected_mse)
+    np.testing.assert_allclose(
+        [policy.intercept, policy.slope, policy.side_coefficient, policy.interaction_coefficient],
+        expected_coefficients,
     )
+
+
+def test_benchmark_fits_and_selects_using_only_supplied_training_paths(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from experiments import benchmark
+
+    market = MarketParams(horizon=150)
+    training = [generate_market_path(market, seed) for seed in range(4)]
+    evaluation = [generate_market_path(market, seed=99)]
+    calls = []
+
+    def record_fit(paths, params):
+        assert paths is training
+        calls.append(paths)
+        return fit_rolling_policy(paths, params)
+
+    monkeypatch.setattr(benchmark, "fit_rolling_policy", record_fit)
+    _, first_fit = benchmark.evaluate_main(market, evaluation, training)
+    changed = [replace(evaluation[0], trade_signs=-evaluation[0].trade_signs,
+                       prices=-evaluation[0].prices)]
+    _, second_fit = benchmark.evaluate_main(market, changed, training)
+    assert len(calls) == 2
+    assert first_fit == second_fit
+
+
+def test_rolling_rejects_insufficient_training_observations() -> None:
+    market = MarketParams(horizon=150)
+    path = generate_market_path(market, seed=63)
+    with pytest.raises(ValueError, match="at least two training paths"):
+        fit_rolling_policy([path], market)
+    with pytest.raises(ValueError, match="positive candidate windows"):
+        fit_rolling_policy([path, path], market, windows=())
+    with pytest.raises(ValueError, match="window 150.*two observations per trade side"):
+        fit_rolling_policy([path, path], market, windows=(150,))
+    one_side = replace(path, trade_signs=np.ones(150, dtype=np.int8))
+    with pytest.raises(ValueError, match="two observations per trade side"):
+        fit_rolling_policy([path, one_side], market)
+    alternating = replace(path, trade_signs=np.tile([-1, 1], 75))
+    with pytest.raises(ValueError, match="rank-deficient"):
+        fit_rolling_policy([alternating, alternating], market, windows=(10,))
 
 
 def test_common_uniforms_create_monotone_fill_coupling() -> None:

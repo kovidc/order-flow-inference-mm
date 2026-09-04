@@ -7,10 +7,20 @@
     "horizon": 1000
   },
   "rolling_window": 10.0,
-  "rolling_intercept": 0.00465118617248311,
-  "rolling_slope": 0.12477827016735793,
+  "rolling_intercept": 0.00467382733539638,
+  "rolling_slope": 0.11440199452419882,
+  "rolling_side_coefficient": 0.02565542534619174,
+  "rolling_interaction_coefficient": -0.00222082563511018,
+  "rolling_fit_paths": 30,
+  "rolling_validation_paths": 10,
+  "rolling_validation_mse": {
+    "5": 0.1268877220096652,
+    "10": 0.12674331169563968,
+    "20": 0.12737905004808783,
+    "50": 0.12841828603292332,
+    "100": 0.12872043945700426
+  },
   "mean_brier_score": 0.2415596423733631,
   "mean_log_loss": 0.6760987103086209,
-  "mean_map_accuracy": 0.5784333333333334,
-  "value_of_information_recovery": 0.36333240199129935
+  "mean_map_accuracy": 0.5784333333333334
 }

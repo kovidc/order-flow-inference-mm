@@ -1,4 +1,4 @@
-"""Validated parameter objects for market truth and a maker's beliefs."""
+"""Parameters for the synthetic market and HMM filter."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _immutable_transition(value: FloatArray) -> FloatArray:
 
 @dataclass(frozen=True)
 class MarketParams:
-    """Parameters of the data-generating process (the market truth)."""
+    """Parameters for the synthetic market and execution model."""
 
     transition: FloatArray = field(default_factory=symmetric_transition)
     beta: float = 0.20

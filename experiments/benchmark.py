@@ -41,7 +41,7 @@ def paths_for(params: MarketParams, seeds: range) -> list[MarketPath]:
 
 def evaluate_main(
     market: MarketParams, evaluation_paths: list[MarketPath], training_paths: list[MarketPath]
-) -> tuple[dict[str, list[BacktestResult]], dict[str, float]]:
+) -> tuple[dict[str, list[BacktestResult]], dict[str, object]]:
     rolling = fit_rolling_policy(training_paths, market)
     beliefs = FilterParams(market.transition, market.beta, market.mu)
     all_results: dict[str, list[BacktestResult]] = {
@@ -65,6 +65,11 @@ def evaluate_main(
         "rolling_window": float(rolling.window),
         "rolling_intercept": rolling.intercept,
         "rolling_slope": rolling.slope,
+        "rolling_side_coefficient": rolling.side_coefficient,
+        "rolling_interaction_coefficient": rolling.interaction_coefficient,
+        "rolling_fit_paths": 3 * len(training_paths) // 4,
+        "rolling_validation_paths": len(training_paths) - 3 * len(training_paths) // 4,
+        "rolling_validation_mse": rolling.validation_mse,
     }
     return all_results, rolling_fit
 
@@ -150,7 +155,7 @@ def plot_example(
     axes[3].axhline(0.0, color="#888888", linewidth=0.7)
     axes[3].set_ylabel("Cumulative P&L")
     axes[3].set_xlabel("Event")
-    fig.suptitle("Bayesian belief, quotes, and marked-to-market P&L on one held-out path")
+    fig.suptitle("Bayesian belief, quotes, and marked-to-market P&L on one evaluation path")
     fig.savefig(destination, dpi=200)
     plt.close(fig)
 
@@ -173,15 +178,15 @@ def plot_policy_comparison(frame: pd.DataFrame, destination: Path) -> None:
     )
     axis.axhline(0.0, color="#333333", linewidth=0.8)
     axis.set_ylabel("Mean terminal P&L (normalized units)")
-    axis.set_title("Held-out paired policy comparison (95% confidence intervals)")
+    axis.set_title("Evaluation policy comparison (95% confidence intervals)")
     fig.savefig(destination, dpi=200)
     plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--paths", type=int, default=300, help="held-out paths in main benchmark")
-    parser.add_argument("--sweep-paths", type=int, default=80, help="held-out paths per sweep point")
+    parser.add_argument("--paths", type=int, default=300, help="evaluation paths in main benchmark")
+    parser.add_argument("--sweep-paths", type=int, default=80, help="evaluation paths per sweep point")
     parser.add_argument("--horizon", type=int, default=1_000)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -196,10 +201,6 @@ def main() -> None:
     frame = benchmark_frame(results)
     frame.to_csv(data_dir / "benchmark.csv", index=False)
     bayesian_inference = inference_summary(results["Bayesian"], evaluation)
-    inventory_mean = float(frame.loc[frame.policy == "Inventory", "mean_pnl"].iloc[0])
-    bayesian_mean = float(frame.loc[frame.policy == "Bayesian", "mean_pnl"].iloc[0])
-    oracle_mean = float(frame.loc[frame.policy == "Oracle", "mean_pnl"].iloc[0])
-    denominator = oracle_mean - inventory_mean
     metadata = {
         "market": {
             "beta": market.beta,
@@ -210,9 +211,6 @@ def main() -> None:
         },
         **rolling_fit,
         **bayesian_inference,
-        "value_of_information_recovery": (
-            (bayesian_mean - inventory_mean) / denominator if denominator != 0.0 else None
-        ),
     }
     (data_dir / "benchmark_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
@@ -228,6 +226,7 @@ def main() -> None:
     plot_policy_comparison(frame, figure_dir / "policy_comparison.png")
     print(frame.to_string(index=False))
     print(json.dumps(metadata, indent=2))
+    print("\nBayesian minus Rolling (paired):", paired_uplift(results["Bayesian"], results["Rolling"]))
     print("\nSensitivity sweeps:\n", sweep_frame.to_string(index=False))
 
 

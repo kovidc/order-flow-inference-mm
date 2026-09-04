@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -83,16 +83,20 @@ class RollingImbalancePolicy(BasePolicy):
     window: int
     intercept: float
     slope: float
+    side_coefficient: float
+    interaction_coefficient: float
     name: str = "Rolling"
+    validation_mse: dict[int, float] = field(default_factory=dict)
 
     def quote(self, inventory: int, trade_history: IntArray) -> Quote:
         recent = trade_history[-self.window :]
         imbalance = float(recent.mean()) if len(recent) else 0.0
-        expected_move = self.intercept + self.slope * imbalance
+        common_move = self.intercept + self.slope * imbalance
+        side_move = self.side_coefficient + self.interaction_coefficient * imbalance
         return closed_form_quote(
             inventory,
-            expected_move,
-            -expected_move,
+            common_move + side_move,
+            -(common_move - side_move),
             self.market.k_fill,
             self.market.inventory_penalty,
             self.market.min_quote_distance,
@@ -128,7 +132,7 @@ class BayesianPolicy(BasePolicy):
 
 @dataclass
 class OraclePolicy(BasePolicy):
-    """Impossible benchmark; only this class accepts the current latent regime."""
+    """Full-information benchmark using the current latent regime."""
 
     market: MarketParams
     name: str = "Oracle"
@@ -145,32 +149,53 @@ class OraclePolicy(BasePolicy):
         )
 
 
+def _rolling_observations(
+    paths: list[MarketPath], window: int
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Build [1, trailing imbalance, current sign, interaction] training rows."""
+    rows = []
+    targets = []
+    for path in paths:
+        increments = np.diff(path.prices)
+        for time in range(window, path.horizon):
+            imbalance = float(path.trade_signs[time - window : time].mean())
+            sign = int(path.trade_signs[time])
+            rows.append((1.0, imbalance, sign, imbalance * sign))
+            targets.append(increments[time])
+    design = np.asarray(rows, dtype=float).reshape(-1, 4)
+    if any(np.count_nonzero(design[:, 2] == sign) < 2 for sign in (-1, 1)):
+        raise ValueError(f"window {window} requires at least two observations per trade side")
+    return design, np.asarray(targets)
+
+
+def _fit_rolling_coefficients(
+    design: NDArray[np.float64], targets: NDArray[np.float64], window: int
+) -> NDArray[np.float64]:
+    coefficients, _, rank, _ = np.linalg.lstsq(design, targets, rcond=None)
+    if rank < 4:
+        raise ValueError(f"window {window} has a rank-deficient conditional OLS design")
+    return coefficients
+
+
 def fit_rolling_policy(
     paths: list[MarketPath],
     market: MarketParams,
     windows: tuple[int, ...] = (5, 10, 20, 50, 100),
 ) -> RollingImbalancePolicy:
-    """Select a window and OLS map using training paths only."""
-    best: tuple[float, int, float, float] | None = None
+    """Select W on a 75/25 ordered training-path split, then refit on all paths."""
+    if len(paths) < 2 or not windows or any(window <= 0 for window in windows):
+        raise ValueError("at least two training paths and positive candidate windows are required")
+    split = 3 * len(paths) // 4
+    validation_mse = {}
     for window in windows:
-        predictors: list[float] = []
-        targets: list[float] = []
-        for path in paths:
-            increments = np.diff(path.prices)
-            signs = path.trade_signs
-            for time in range(window, path.horizon):
-                predictors.append(float(signs[time - window : time].mean()))
-                targets.append(float(increments[time]))
-        if not predictors:
-            continue
-        design = np.column_stack((np.ones(len(predictors)), predictors))
-        coefficients, *_ = np.linalg.lstsq(design, np.asarray(targets), rcond=None)
-        residuals = np.asarray(targets) - design @ coefficients
-        mse = float(np.mean(residuals**2))
-        candidate = (mse, window, float(coefficients[0]), float(coefficients[1]))
-        if best is None or candidate < best:
-            best = candidate
-    if best is None:
-        raise ValueError("at least one training path and candidate window are required")
-    _, window, intercept, slope = best
-    return RollingImbalancePolicy(market, window, intercept, slope)
+        design, targets = _rolling_observations(paths[:split], window)
+        coefficients = _fit_rolling_coefficients(design, targets, window)
+        validation_design, validation_targets = _rolling_observations(paths[split:], window)
+        residuals = validation_targets - validation_design @ coefficients
+        validation_mse[window] = float(np.mean(residuals**2))
+    window = min(validation_mse, key=lambda candidate: (validation_mse[candidate], candidate))
+    design, targets = _rolling_observations(paths, window)
+    coefficients = _fit_rolling_coefficients(design, targets, window)
+    return RollingImbalancePolicy(
+        market, window, *map(float, coefficients), validation_mse=validation_mse
+    )

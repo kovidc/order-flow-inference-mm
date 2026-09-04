@@ -80,7 +80,7 @@ The implementation uses `max(0, δ*)` as a minimum-distance safeguard. The resul
 
 - **Fixed:** uses a constant symmetric distance `1/k` and ignores inference and inventory.
 - **Inventory:** uses the same quoting rule with adverse-selection costs set to zero.
-- **Rolling:** predicts price pressure from the mean of the last `W` trade signs. `W ∈ {5, 10, 20, 50, 100}` is selected on separate training seeds.
+- **Rolling:** fits a conditional OLS model of price changes using trailing sign imbalance, trade side, and their interaction on separate training paths. At quote time, it evaluates hypothetical buy and sell signs using only the observed history. `W ∈ {5, 10, 20, 50, 100}` is selected by validation MSE.
 - **Bayesian:** uses HMM side-conditional posteriors and the assumed `μ` map.
 - **Oracle:** uses the latent state `Z_t` directly as a full-information benchmark.
 
@@ -101,7 +101,7 @@ python -m venv .venv
 .venv/bin/python experiments/inference_vs_decision.py
 ```
 
-The rolling baseline is tuned on separate training seeds. The benchmark, sensitivity, and misspecification runs use disjoint deterministic seed ranges. Running the scripts overwrites the derived CSV/JSON files in `data/` and the PNG figures in `figures/`.
+The rolling baseline uses seeds 1000–1029 to fit each candidate window and 1030–1039 for validation, then refits the selected window (10) on all 40 training paths. The benchmark, sensitivity, and misspecification runs use disjoint deterministic seed ranges. Running the scripts overwrites the derived CSV/JSON files in `data/` and the PNG figures in `figures/`.
 
 ## Benchmark
 
@@ -111,11 +111,11 @@ All P&L figures are in normalized simulation units. Confidence intervals for mea
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Fixed | 184.54 [141.52, 227.55] | 380.16 | -935.56 | 293.37 | 0.333 | 15.66 | 30.11 | 0.0317 |
 | Inventory | 196.44 [185.95, 206.94] | 92.74 | -38.22 | 64.66 | 0.326 | 4.54 | 11.73 | 0.0278 |
-| Rolling | 206.13 [196.36, 215.89] | 86.31 | -6.29 | 57.34 | 0.324 | 4.24 | 11.04 | 0.0257 |
+| Rolling | 208.36 [198.62, 218.09] | 86.04 | -6.10 | 56.98 | 0.316 | 4.23 | 10.98 | 0.0257 |
 | Bayesian | 209.28 [199.62, 218.93] | 85.32 | -5.19 | 56.05 | 0.317 | 4.18 | 10.88 | 0.0254 |
 | Oracle | 231.77 [222.61, 240.92] | 80.91 | 34.59 | 50.38 | 0.318 | 4.03 | 10.57 | 0.0202 |
 
-For next-trade prediction, the Bayesian filter achieved a Brier score of **0.2416**, log loss **0.6761**, and latent-state MAP accuracy **0.5784**. Fixed quoting had a similar mean P&L, but its dispersion and tail losses were much larger because it didn't control inventory.
+The two inference-based policies were close on these simulations. The HMM earned 0.92 more units than the rolling baseline on average, with a 95% paired interval of [−0.22, 2.06]. For next-trade prediction, the Bayesian filter achieved a Brier score of **0.2416**, log loss **0.6761**, and latent-state MAP accuracy **0.5784**. Fixed quoting had much larger dispersion and tail losses because it didn't control inventory.
 
 ![Five-policy comparison](figures/policy_comparison.png)
 
